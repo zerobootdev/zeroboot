@@ -234,7 +234,7 @@ fn parse_cpuid(data: &[u8]) -> Vec<kvm_cpuid_entry2> {
         if r32(data, i + 12) != 0 {
             continue;
         } // index == 0
-          // Check vendor string in ebx (offset 24 from entry start)
+        // Check vendor string in ebx (offset 24 from entry start)
         if i + 28 > data.len() {
             continue;
         }
