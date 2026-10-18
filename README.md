@@ -75,9 +75,22 @@ const result = await new Sandbox("zb_live_your_key").run("console.log(1+1)");
 - [Deployment Guide](docs/DEPLOYMENT.md)
 - [Architecture](docs/ARCHITECTURE.md)
 
+## Author
+
+Zeroboot was created in March 2026 and is maintained by **Adam Miribyan** ([@adammiribyan](https://github.com/adammiribyan)). Project site: [zeroboot.dev](https://zeroboot.dev).
+
+If you use zeroboot in research, please cite it; see [CITATION.cff](CITATION.cff) or use the "Cite this repository" button.
+
+## Cited by
+
+- *DeltaBox: Scaling Stateful AI Agents with Millisecond-Level Sandbox Checkpoint/Rollback*, arXiv:2605.22781 (May 2026).
+- *Memory Compression for High-Fanout Agent Sandboxes* (AgentZip), arXiv:2609.11294 (September 2026).
+
+If your paper or project uses zeroboot, open an issue or pull request to add it here.
+
 ## Status
 
-Working prototype. The fork primitive, benchmarks, and API are real, but not production-hardened yet. [Open an issue](https://github.com/adammiribyan/zeroboot/issues) if you're interested.
+Working prototype. The fork primitive, benchmarks, and API are real, but not production-hardened yet. [Open an issue](https://github.com/zerobootdev/zeroboot/issues) if you're interested.
 
 ## Self-host or managed
 

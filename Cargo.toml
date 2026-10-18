@@ -4,7 +4,8 @@ version = "0.1.0"
 edition = "2021"
 license = "Apache-2.0"
 description = "Sub-millisecond VM sandboxes for AI agents via copy-on-write forking"
-repository = "https://github.com/zeroboot/zeroboot"
+repository = "https://github.com/zerobootdev/zeroboot"
+authors = ["Adam Miribyan"]
 keywords = ["vm", "sandbox", "kvm", "isolation", "firecracker"]
 categories = ["virtualization"]
 
