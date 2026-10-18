@@ -1,0 +1,47 @@
+{
+  "title": "zeroboot: Sub-millisecond VM sandboxes for AI agents via copy-on-write forking",
+  "upload_type": "software",
+  "description": "<p>zeroboot creates isolated sandboxes for AI agents by booting a Firecracker microVM once, snapshotting its memory and CPU state, and then forking new KVM virtual machines from that snapshot with copy-on-write memory mappings. Each fork is a separate KVM virtual machine with hardware-enforced memory isolation. The project reports sub-millisecond fork latency and a few hundred kilobytes of memory per sandbox on its published benchmark; see the repository README for the measurement and its limitations.</p><p>Written in Rust. Includes an HTTP API and Python and TypeScript SDKs.</p>",
+  "creators": [
+    {
+      "name": "Miribyan, Adam"
+    }
+  ],
+  "license": "Apache-2.0",
+  "access_right": "open",
+  "keywords": [
+    "sandbox",
+    "virtual machine",
+    "KVM",
+    "Firecracker",
+    "copy-on-write",
+    "snapshot",
+    "AI agents",
+    "Rust"
+  ],
+  "related_identifiers": [
+    {
+      "identifier": "https://github.com/zerobootdev/zeroboot",
+      "relation": "isSupplementTo",
+      "resource_type": "software",
+      "scheme": "url"
+    },
+    {
+      "identifier": "https://zeroboot.dev",
+      "relation": "isDescribedBy",
+      "scheme": "url"
+    },
+    {
+      "identifier": "10.48550/arXiv.2605.22781",
+      "relation": "isCitedBy",
+      "resource_type": "publication-preprint",
+      "scheme": "doi"
+    },
+    {
+      "identifier": "10.48550/arXiv.2609.11294",
+      "relation": "isCitedBy",
+      "resource_type": "publication-preprint",
+      "scheme": "doi"
+    }
+  ]
+}

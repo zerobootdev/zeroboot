@@ -1,0 +1,26 @@
+cff-version: 1.2.0
+message: "If you use zeroboot, please cite it using the metadata in this file."
+type: software
+title: "zeroboot"
+abstract: "Sub-millisecond KVM virtual-machine sandboxes for AI agents, created by copy-on-write forking of a Firecracker memory snapshot."
+authors:
+  - family-names: "Miribyan"
+    given-names: "Adam"
+repository-code: "https://github.com/zerobootdev/zeroboot"
+url: "https://zeroboot.dev"
+license: Apache-2.0
+keywords:
+  - sandbox
+  - virtual machine
+  - KVM
+  - Firecracker
+  - copy-on-write
+  - AI agents
+# version and date-released describe the state launched on 2026-03-17 and last pushed on 2026-03-21; no git tag existed when this file was added.
+# After Zenodo mints a DOI for the release, add:
+# identifiers:
+#   - type: doi
+#     value: 10.5281/zenodo.XXXXXXX
+#     description: "Concept DOI for all versions"
+version: "0.1.0"
+date-released: "2026-03-21"
