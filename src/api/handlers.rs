@@ -1,6 +1,7 @@
 use axum::extract::{ConnectInfo, Json, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::IntoResponse;
+use std::fs::File;
 use std::net::SocketAddr;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -95,6 +96,7 @@ impl TokenBucket {
 pub struct Template {
     pub snapshot: VmSnapshot,
     pub memfd: i32,
+    pub block_file: Option<Arc<File>>,
 }
 
 pub struct AppState {
@@ -325,7 +327,7 @@ fn execute_code(state: &AppState, req: &ExecRequest, request_id: &str) -> ExecRe
                 };
             }
         };
-        let mut vm = match ForkedVm::fork_cow(&template.snapshot, template.memfd) {
+        let mut vm = match ForkedVm::fork_cow(&template.snapshot, template.memfd, template.block_file.clone()) {
             Ok(vm) => vm,
             Err(e) => {
                 state.metrics.total_errors.fetch_add(1, Ordering::Relaxed);
@@ -342,7 +344,8 @@ fn execute_code(state: &AppState, req: &ExecRequest, request_id: &str) -> ExecRe
         state.metrics.fork_time_hist.observe(vm.fork_time_us / 1000.0);
 
         let exec_start = Instant::now();
-        let command = format!("{}\n", req.code);
+        let command = format!("CODE:{}
+", req.code);
         if let Err(e) = vm.send_serial(command.as_bytes()) {
             state.metrics.total_errors.fetch_add(1, Ordering::Relaxed);
             return ExecResponse {
@@ -390,10 +393,18 @@ fn execute_code(state: &AppState, req: &ExecRequest, request_id: &str) -> ExecRe
         let has_marker = output.contains("ZEROBOOT_DONE");
         let mut stdout = output.replace("ZEROBOOT_DONE", "").replace("\r\n", "\n").replace("\r", "");
         if let Some(pos) = stdout.find('\n') {
-            if stdout[..pos].trim() == req.code.trim() {
+            let echo_prefix = format!("CODE:{}", req.code.trim());
+            if stdout[..pos].trim() == echo_prefix.trim() {
                 stdout = stdout[pos+1..].to_string();
             }
         }
+
+        // Filter kernel log lines (e.g. "[18446744073.xxx] random: ...")
+        stdout = stdout.lines()
+            .filter(|l| !(l.trim_start().starts_with('[') && l.contains("] ")))
+            .collect::<Vec<_>>()
+            .join("
+");
 
         let (exit_code, stderr) = if has_marker {
             (0, String::new())

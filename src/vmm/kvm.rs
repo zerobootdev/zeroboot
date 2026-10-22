@@ -2,10 +2,14 @@ use anyhow::{Result, bail};
 use kvm_bindings::*;
 use kvm_bindings::CpuId;
 use kvm_ioctls::{Kvm, VcpuExit, VmFd, VcpuFd};
+use std::fs::File;
 use std::ptr;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use super::serial::Serial;
+use super::virtio_blk::{VirtioBlk, VirtioQueueAddrs};
+use super::vmstate::SecondaryVcpuState;
 
 extern "C" fn noop_signal_handler(_: libc::c_int) {}
 
@@ -23,6 +27,8 @@ pub struct VmSnapshot {
     pub xsave: kvm_xsave,
     pub cpuid_entries: Vec<kvm_cpuid_entry2>,
     pub mem_size: usize,
+    pub virtio_queue: Option<VirtioQueueAddrs>,
+    pub secondary_vcpus: Vec<SecondaryVcpuState>,
 }
 
 
@@ -32,13 +38,19 @@ pub struct ForkedVm {
     pub mem_ptr: *mut u8,
     pub mem_size: usize,
     pub serial: Serial,
+    pub virtio_blk: Option<VirtioBlk>,
     pub fork_time_us: f64,
     _kvm: Kvm,
 }
 
+// Safety: mem_ptr points to a private mmap region owned exclusively by this ForkedVm.
+// No other thread can access it without going through ForkedVm methods.
+// SAFETY: ForkedVm is never shared across threads without external synchronization.
+unsafe impl Send for ForkedVm {}
+unsafe impl Sync for ForkedVm {}
 
 impl ForkedVm {
-    pub fn fork_cow(snapshot: &VmSnapshot, memfd: i32) -> Result<Self> {
+    pub fn fork_cow(snapshot: &VmSnapshot, memfd: i32, block_file: Option<Arc<File>>) -> Result<Self> {
         let start = Instant::now();
 
         let kvm = Kvm::new()?;
@@ -90,14 +102,23 @@ impl ForkedVm {
         if !snapshot.cpuid_entries.is_empty() {
             let cpuid = CpuId::from_entries(&snapshot.cpuid_entries)
                 .map_err(|e| anyhow::anyhow!("CpuId::from_entries: {:?}", e))?;
-            vcpu_fd.set_cpuid2(&cpuid)?;
+            match vcpu_fd.set_cpuid2(&cpuid) {
+                Ok(_) => {}
+                Err(e) => {
+                    eprintln!("  Warning: snapshot CPUID rejected ({}), using host CPUID", e);
+                    let cpuid = kvm.get_supported_cpuid(KVM_MAX_CPUID_ENTRIES)?;
+                    vcpu_fd.set_cpuid2(&cpuid)
+                        .map_err(|e| anyhow::anyhow!("set_cpuid2 (host fallback): {}", e))?;
+                }
+            }
         } else {
-            // Fallback to host CPUID if snapshot has none (shouldn't happen)
             let cpuid = kvm.get_supported_cpuid(KVM_MAX_CPUID_ENTRIES)?;
-            vcpu_fd.set_cpuid2(&cpuid)?;
+            vcpu_fd.set_cpuid2(&cpuid)
+                .map_err(|e| anyhow::anyhow!("set_cpuid2 (host): {}", e))?;
         }
 
-        vcpu_fd.set_sregs(&snapshot.sregs)?;
+        vcpu_fd.set_sregs(&snapshot.sregs)
+            .map_err(|e| anyhow::anyhow!("set_sregs: {}", e))?;
 
         // Restore XCRS (must be after sregs — CR4.OSXSAVE must be set first)
         if snapshot.xcrs.nr_xcrs > 0 {
@@ -109,7 +130,8 @@ impl ForkedVm {
         vcpu_fd.set_xsave(&snapshot.xsave)
             .map_err(|e| anyhow::anyhow!("set_xsave: {}", e))?;
 
-        vcpu_fd.set_regs(&snapshot.regs)?;
+        vcpu_fd.set_regs(&snapshot.regs)
+            .map_err(|e| anyhow::anyhow!("set_regs: {}", e))?;
 
         // Restore LAPIC
         let _ = vcpu_fd.set_lapic(&snapshot.lapic);
@@ -128,10 +150,73 @@ impl ForkedVm {
         // MUST be last: set MP state to RUNNABLE so vCPU isn't stuck in HLT
         let _ = vcpu_fd.set_mp_state(kvm_mp_state { mp_state: 0 });
 
+        // Create and restore secondary vCPUs, running them in background threads
+        for (i, sec) in snapshot.secondary_vcpus.iter().enumerate() {
+            let vcpu_id = (i + 1) as u64;
+            let mut sec_fd = vm_fd.create_vcpu(vcpu_id)
+                .map_err(|e| anyhow::anyhow!("create_vcpu({}): {}", vcpu_id, e))?;
+
+            // Use host CPUID for secondary vCPUs (same as primary fallback)
+            let cpuid = kvm.get_supported_cpuid(KVM_MAX_CPUID_ENTRIES)?;
+            let _ = sec_fd.set_cpuid2(&cpuid);
+
+            let _ = sec_fd.set_sregs(&sec.sregs);
+            if sec.xcrs.nr_xcrs > 0 {
+                let _ = sec_fd.set_xcrs(&sec.xcrs);
+            }
+            let _ = sec_fd.set_xsave(&sec.xsave);
+            let _ = sec_fd.set_regs(&sec.regs);
+            let _ = sec_fd.set_lapic(&sec.lapic);
+
+            // Restore MSRs on secondary vCPU too
+            if !snapshot.msrs.is_empty() {
+                let mut msrs = Msrs::new(snapshot.msrs.len()).unwrap();
+                for (j, entry) in snapshot.msrs.iter().enumerate() {
+                    msrs.as_mut_slice()[j] = *entry;
+                }
+                let _ = sec_fd.set_msrs(&msrs);
+            }
+
+            let _ = sec_fd.set_mp_state(kvm_mp_state { mp_state: 0 });
+
+            // Run secondary vCPU in background thread.
+            // It will mostly idle (HLT) and wake for timer interrupts/IPIs.
+            std::thread::spawn(move || {
+                loop {
+                    match sec_fd.run() {
+                        Ok(VcpuExit::IoIn(_, data)) => { data[0] = 0xff; }
+                        Ok(VcpuExit::IoOut(_, _)) => {}
+                        Ok(VcpuExit::MmioRead(_, data)) => {
+                            for b in data.iter_mut() { *b = 0xff; }
+                        }
+                        Ok(VcpuExit::MmioWrite(_, _)) => {}
+                        Ok(VcpuExit::Hlt) => {} // idle; KVM will wake on interrupt
+                        Ok(VcpuExit::Shutdown) => break,
+                        Ok(VcpuExit::InternalError) => break,
+                        Err(e) if e.errno() == libc::EAGAIN => {}
+                        Err(e) if e.errno() == libc::EINTR => {}
+                        Err(_) => break,
+                        _ => {}
+                    }
+                }
+            });
+        }
+
+        // Create virtio-blk emulator if queue addresses and block device are available
+        let virtio_blk = match (&snapshot.virtio_queue, block_file) {
+            (Some(queue), Some(file)) => {
+                let mut blk = VirtioBlk::new(queue.clone(), file);
+                blk.init_from_guest_memory(fork_mem as *const u8, snapshot.mem_size);
+                Some(blk)
+            }
+            _ => None,
+        };
+
         Ok(Self {
             _kvm: kvm, vm_fd, vcpu_fd,
             mem_ptr: fork_mem as *mut u8, mem_size: snapshot.mem_size,
             serial: Serial::new(),
+            virtio_blk,
             fork_time_us: start.elapsed().as_secs_f64() * 1_000_000.0,
         })
     }
@@ -175,10 +260,11 @@ impl ForkedVm {
             }
             // Create a per-thread timer using CLOCK_THREAD_CPUTIME_ID won't work
             // across threads, so use a helper thread that sleeps then signals us.
-            let thread_id = unsafe { libc::pthread_self() };
+            // Cast pthread_t to usize so the closure is Send (pthread_t is *mut c_void on musl)
+            let thread_id = unsafe { libc::pthread_self() } as usize;
             let handle = std::thread::spawn(move || {
                 std::thread::sleep(dur);
-                unsafe { libc::pthread_kill(thread_id, libc::SIGALRM); }
+                unsafe { libc::pthread_kill(thread_id as libc::pthread_t, libc::SIGALRM); }
             });
             Some(handle)
         } else {
@@ -272,8 +358,19 @@ impl ForkedVm {
                     VcpuExit::Shutdown => {
                         return Ok(String::from_utf8_lossy(&self.serial.output).to_string());
                     }
-                    VcpuExit::MmioRead(_, data) => { for b in data.iter_mut() { *b = 0xff; } }
-                    VcpuExit::MmioWrite(_, _) => {}
+                    VcpuExit::MmioRead(addr, data) => {
+                        match &self.virtio_blk {
+                            Some(blk) if blk.handles_mmio(addr) => blk.mmio_read(addr, data),
+                            _ => { for b in data.iter_mut() { *b = 0xff; } }
+                        }
+                    }
+                    VcpuExit::MmioWrite(addr, data) => {
+                        if let Some(ref mut blk) = self.virtio_blk {
+                            if blk.handles_mmio(addr) {
+                                blk.mmio_write(addr, data, self.mem_ptr, self.mem_size, &self.vm_fd);
+                            }
+                        }
+                    }
                     VcpuExit::InternalError => bail!("KVM internal error"),
                     _ => {}
                 },
@@ -302,7 +399,13 @@ impl Drop for ForkedVm {
     }
 }
 
-pub fn create_snapshot_memfd(mem_ptr: *const u8, mem_size: usize) -> Result<i32> {
+
+/// Create a snapshot memfd by copying directly from a file using copy_file_range.
+/// This avoids allocating a user-space buffer for the entire snapshot memory,
+/// keeping peak RSS low (kernel-to-kernel copy).
+pub fn create_snapshot_memfd_from_file(src_file: &File, mem_size: usize) -> Result<i32> {
+    use std::os::unix::io::AsRawFd;
+
     let name = std::ffi::CString::new("zeroboot-snapshot").unwrap();
     let fd = unsafe { libc::memfd_create(name.as_ptr(), libc::MFD_CLOEXEC) };
     if fd < 0 { bail!("memfd_create failed"); }
@@ -310,17 +413,22 @@ pub fn create_snapshot_memfd(mem_ptr: *const u8, mem_size: usize) -> Result<i32>
         unsafe { libc::close(fd); }
         bail!("ftruncate failed");
     }
-    let dst = unsafe {
-        libc::mmap(ptr::null_mut(), mem_size, libc::PROT_READ | libc::PROT_WRITE,
-            libc::MAP_SHARED, fd, 0)
-    };
-    if dst == libc::MAP_FAILED {
-        unsafe { libc::close(fd); }
-        bail!("mmap failed");
+
+    let src_fd = src_file.as_raw_fd();
+    let mut offset: i64 = 0;
+    let mut remaining = mem_size;
+    while remaining > 0 {
+        let chunk = remaining.min(64 * 1024 * 1024); // 64MB chunks
+        let n = unsafe {
+            libc::sendfile(fd, src_fd, &mut offset, chunk)
+        };
+        if n <= 0 {
+            let err = std::io::Error::last_os_error();
+            unsafe { libc::close(fd); }
+            bail!("sendfile failed: {}", err);
+        }
+        remaining -= n as usize;
     }
-    unsafe {
-        ptr::copy_nonoverlapping(mem_ptr, dst as *mut u8, mem_size);
-        libc::munmap(dst, mem_size);
-    }
+
     Ok(fd)
 }

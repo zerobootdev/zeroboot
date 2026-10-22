@@ -2,6 +2,7 @@ mod api;
 mod vmm;
 
 use anyhow::{bail, Result};
+use std::fs::File;
 use std::ptr;
 use std::sync::Arc;
 use std::time::Instant;
@@ -10,7 +11,7 @@ use api::handlers::{
     batch_handler, exec_handler, health_handler, metrics_handler, AppState, Metrics, Template,
 };
 use vmm::firecracker;
-use vmm::kvm::{create_snapshot_memfd, ForkedVm, VmSnapshot};
+use vmm::kvm::{create_snapshot_memfd_from_file, ForkedVm, VmSnapshot};
 use vmm::vmstate;
 
 fn main() -> Result<()> {
@@ -35,20 +36,19 @@ fn main() -> Result<()> {
     }
 }
 
-fn load_snapshot(workdir: &str) -> Result<(VmSnapshot, i32)> {
+fn load_snapshot(workdir: &str) -> Result<(VmSnapshot, i32, Option<Arc<File>>)> {
     let mem_path = format!("{}/snapshot/mem", workdir);
     let state_path = format!("{}/snapshot/vmstate", workdir);
 
     eprintln!("Loading snapshot from {}...", workdir);
 
-    // Load memory
-    let mem_data = std::fs::read(&mem_path)?;
-    let mem_size = mem_data.len();
+    // Load memory directly into memfd (no intermediate buffer)
+    let src_file = File::open(&mem_path)?;
+    let mem_size = src_file.metadata()?.len() as usize;
     eprintln!("  Memory: {} MiB", mem_size / 1024 / 1024);
 
-    // Create memfd for CoW
-    let memfd = create_snapshot_memfd(mem_data.as_ptr(), mem_size)?;
-    drop(mem_data);
+    let memfd = create_snapshot_memfd_from_file(&src_file, mem_size)?;
+    drop(src_file);
 
     // Load vmstate for CPU registers
     let state_data = std::fs::read(&state_path)?;
@@ -64,6 +64,36 @@ fn load_snapshot(workdir: &str) -> Result<(VmSnapshot, i32)> {
         parsed.cpuid_entries.len()
     );
 
+    if let Some(ref vq) = parsed.virtio_queue {
+        eprintln!(
+            "  Virtio queue: desc={:#x} avail={:#x} used={:#x} size={}",
+            vq.desc_table, vq.avail_ring, vq.used_ring, vq.queue_size
+        );
+    }
+
+    // Try to find the rootfs block device image
+    let block_file = std::fs::read_to_string(format!("{}/rootfs_path", workdir))
+        .ok()
+        .or_else(|| std::env::var("ZEROBOOT_ROOTFS").ok())
+        .and_then(|path| {
+            let path = path.trim().to_string();
+            match File::open(&path) {
+                Ok(f) => {
+                    eprintln!("  Block device: {}", path);
+                    Some(Arc::new(f))
+                }
+                Err(e) => {
+                    eprintln!("  Block device not found at {}: {}", path, e);
+                    None
+                }
+            }
+        });
+
+    let vcpu_count = 1 + parsed.secondary_vcpus.len();
+    if vcpu_count > 1 {
+        eprintln!("  vCPUs: {} (1 primary + {} secondary)", vcpu_count, parsed.secondary_vcpus.len());
+    }
+
     let snapshot = VmSnapshot {
         regs: parsed.regs,
         sregs: parsed.sregs,
@@ -74,9 +104,11 @@ fn load_snapshot(workdir: &str) -> Result<(VmSnapshot, i32)> {
         xsave: parsed.xsave,
         cpuid_entries: parsed.cpuid_entries,
         mem_size,
+        virtio_queue: parsed.virtio_queue,
+        secondary_vcpus: parsed.secondary_vcpus,
     };
 
-    Ok((snapshot, memfd))
+    Ok((snapshot, memfd, block_file))
 }
 
 fn cmd_template(args: &[String]) -> Result<()> {
@@ -106,6 +138,10 @@ fn cmd_template(args: &[String]) -> Result<()> {
     )?;
     let elapsed = start.elapsed();
 
+    // Save rootfs path for later use by fork_cow
+    let rootfs_abs = std::fs::canonicalize(rootfs).unwrap_or_else(|_| rootfs.into());
+    let _ = std::fs::write(format!("{}/rootfs_path", workdir), rootfs_abs.to_string_lossy().as_ref());
+
     println!("Template created in {:.2}s", elapsed.as_secs_f64());
     println!("  State: {}", state_path);
     println!("  Memory: {} ({} MiB)", mem_path, mem_mib);
@@ -120,11 +156,11 @@ fn cmd_test_exec(args: &[String]) -> Result<()> {
     let workdir = &args[0];
     let command = args[1..].join(" ");
 
-    let (snapshot, memfd) = load_snapshot(workdir)?;
+    let (snapshot, memfd, block_file) = load_snapshot(workdir)?;
 
     eprintln!("Forking VM...");
     let fork_start = Instant::now();
-    let mut vm = ForkedVm::fork_cow(&snapshot, memfd)?;
+    let mut vm = ForkedVm::fork_cow(&snapshot, memfd, block_file)?;
     eprintln!("  Fork time: {:.1}µs", vm.fork_time_us);
 
     // Send command to guest
@@ -157,7 +193,7 @@ fn cmd_fork_bench(args: &[String]) -> Result<()> {
         bail!("Usage: zeroboot bench <workdir>");
     }
     let workdir = &args[0];
-    let (snapshot, memfd) = load_snapshot(workdir)?;
+    let (snapshot, memfd, block_file) = load_snapshot(workdir)?;
     let mem_size = snapshot.mem_size;
 
     eprintln!("\n=== Zeroboot Fork Benchmark ===\n");
@@ -209,12 +245,12 @@ fn cmd_fork_bench(args: &[String]) -> Result<()> {
     let mut fork_times: Vec<f64> = Vec::with_capacity(1000);
     // warmup
     for _ in 0..20 {
-        let vm = ForkedVm::fork_cow(&snapshot, memfd)?;
+        let vm = ForkedVm::fork_cow(&snapshot, memfd, block_file.clone())?;
         drop(vm);
     }
     for _ in 0..1000 {
         let start = Instant::now();
-        let vm = ForkedVm::fork_cow(&snapshot, memfd)?;
+        let vm = ForkedVm::fork_cow(&snapshot, memfd, block_file.clone())?;
         fork_times.push(start.elapsed().as_secs_f64() * 1_000_000.0);
         drop(vm);
     }
@@ -229,7 +265,7 @@ fn cmd_fork_bench(args: &[String]) -> Result<()> {
 
     for i in 0..100 {
         let start = Instant::now();
-        let mut vm = ForkedVm::fork_cow(&snapshot, memfd)?;
+        let mut vm = ForkedVm::fork_cow(&snapshot, memfd, block_file.clone())?;
         let _ = vm.send_serial(b"echo hello\n");
         let output = vm.run_until_marker("hello", 100_000_000)?;
         let t = start.elapsed().as_secs_f64() * 1000.0;
@@ -260,7 +296,7 @@ fn cmd_fork_bench(args: &[String]) -> Result<()> {
         let start = Instant::now();
         let mut vms: Vec<ForkedVm> = Vec::with_capacity(*count);
         for _ in 0..*count {
-            vms.push(ForkedVm::fork_cow(&snapshot, memfd)?);
+            vms.push(ForkedVm::fork_cow(&snapshot, memfd, block_file.clone())?);
         }
         let total = start.elapsed();
         let rss_kb = get_rss_kb();
@@ -402,9 +438,9 @@ fn cmd_serve(args: &[String]) -> Result<()> {
         } else {
             ("python".to_string(), spec.to_string())
         };
-        let (snapshot, memfd) = load_snapshot(&dir)?;
+        let (snapshot, memfd, block_file) = load_snapshot(&dir)?;
         eprintln!("  Template '{}' loaded from {}", lang, dir);
-        templates.insert(lang, Template { snapshot, memfd });
+        templates.insert(lang, Template { snapshot, memfd, block_file });
     }
 
     let api_keys = load_api_keys();

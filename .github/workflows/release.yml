@@ -1,0 +1,61 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-release:
+    name: Build and Release
+    runs-on: ubuntu-22.04
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-musl
+
+      - name: Install musl tools
+        run: sudo apt-get install -y musl-tools
+
+      - name: Build (static binary)
+        run: |
+          cargo build --release --target x86_64-unknown-linux-musl
+          strip target/x86_64-unknown-linux-musl/release/zeroboot
+
+      - name: Rename binary
+        run: |
+          VERSION=${GITHUB_REF_NAME}
+          cp target/x86_64-unknown-linux-musl/release/zeroboot \
+             zeroboot-${VERSION}-x86_64-linux
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: "${{ github.ref_name }}"
+          body: |
+            ## Install
+
+            ```bash
+            VERSION=${{ github.ref_name }}
+            curl -fsSL "https://github.com/${{ github.repository }}/releases/download/${VERSION}/zeroboot-${VERSION}-x86_64-linux" \
+              -o /usr/local/bin/zeroboot
+            chmod +x /usr/local/bin/zeroboot
+            zeroboot --help
+            ```
+
+            ## Requirements
+            - Linux x86_64
+            - `/dev/kvm` available (bare metal or EC2 c8i/m8i/r8i with nested virtualization)
+            - Firecracker: `v1.12+` (see [install guide](docs/QUICKSTART.md))
+          files: |
+            zeroboot-${{ github.ref_name }}-x86_64-linux
+          draft: false
+          prerelease: false
