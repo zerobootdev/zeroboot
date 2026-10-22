@@ -28,14 +28,18 @@ pub struct ParsedVmState {
     pub cpuid_entries: Vec<kvm_cpuid_entry2>,
 }
 
-/// Find the base offset shift by locating the IOAPIC base address (0xFEC00000).
-/// Returns the signed delta to subtract from reference offsets.
+/// Find the IOAPIC offset shift by locating the IOAPIC base address (0xFEC00000).
+///
+/// The vmstate has variable-length versionize sections, so IOAPIC and CPU
+/// register regions may have *different* shifts from the reference offsets.
+/// This function returns the shift for the IOAPIC region only; CPU fields
+/// are located independently by [`detect_cpu_shift`].
 fn detect_offset_shift(data: &[u8]) -> Result<isize> {
     let target: u64 = 0xFEC00000; // Standard IOAPIC MMIO base
     for i in 0..data.len().saturating_sub(8) {
         if r64(data, i) == target {
             let shift = REF_IOAPIC as isize - i as isize;
-            // Validate: check that EFER at the shifted offset looks right (0xD01 or 0x501)
+            // Fast path: if a single global shift works (EFER also matches), use it.
             let efer_off = (REF_EFER as isize - shift) as usize;
             if efer_off + 8 <= data.len() {
                 let efer = r64(data, efer_off);
@@ -43,9 +47,34 @@ fn detect_offset_shift(data: &[u8]) -> Result<isize> {
                     return Ok(shift);
                 }
             }
+            // EFER didn't match at the same shift -- variable-length sections
+            // caused a divergence. Return the IOAPIC shift; parse_vmstate will
+            // use detect_cpu_shift() for CPU register fields.
+            return Ok(shift);
         }
     }
     bail!("cannot detect vmstate layout: IOAPIC base address 0xFEC00000 not found");
+}
+
+/// Independently locate the CPU register shift by searching for EFER.
+///
+/// EFER values are typically 0xD01 (SCE|LME|LMA|NXE) or 0x501 (SCE|LME|NXE).
+/// Validated by checking that CR0 sits 40 bytes before EFER with PG+PE set.
+fn detect_cpu_shift(data: &[u8]) -> Result<isize> {
+    for i in 0..data.len().saturating_sub(8) {
+        let val = r64(data, i);
+        if val == 0xD01 || val == 0x501 {
+            // CR0 is at REF_CR, EFER is at REF_EFER; delta = REF_EFER - REF_CR = 40 bytes
+            if i >= 40 {
+                let cr0 = r64(data, i - 40);
+                // PG (bit 31) + PE (bit 0) must be set; value should be a valid CR0
+                if cr0 & 0x80000001 == 0x80000001 && cr0 < 0x100000000 {
+                    return Ok(REF_EFER as isize - i as isize);
+                }
+            }
+        }
+    }
+    bail!("cannot find EFER in vmstate");
 }
 
 fn adj(reference: usize, shift: isize) -> usize {
@@ -53,20 +82,20 @@ fn adj(reference: usize, shift: isize) -> usize {
 }
 
 pub fn parse_vmstate(data: &[u8]) -> Result<ParsedVmState> {
-    let shift = detect_offset_shift(data)?;
-    let efer_off = adj(REF_EFER, shift);
-    if efer_off + 8 > data.len() {
-        bail!("vmstate too small: {} bytes", data.len());
-    }
+    let ioapic_shift = detect_offset_shift(data)?;
+
+    // CPU register fields may have a different shift than IOAPIC due to
+    // variable-length versionize sections. Find EFER independently.
+    let cpu_shift = detect_cpu_shift(data).unwrap_or(ioapic_shift);
 
     Ok(ParsedVmState {
-        regs: parse_regs(data, adj(REF_REGS, shift)),
-        sregs: parse_sregs(data, shift),
+        regs: parse_regs(data, adj(REF_REGS, cpu_shift)),
+        sregs: parse_sregs(data, cpu_shift),
         msrs: parse_msrs(data),
-        lapic: parse_lapic(data, adj(REF_LAPIC, shift)),
-        ioapic_redirtbl: parse_ioapic_redirtbl(data, adj(REF_IOAPIC, shift)),
-        xcrs: parse_xcrs(data, adj(REF_XCRS, shift)),
-        xsave: parse_xsave(data, adj(REF_XSAVE, shift)),
+        lapic: parse_lapic(data, adj(REF_LAPIC, cpu_shift)),
+        ioapic_redirtbl: parse_ioapic_redirtbl(data, adj(REF_IOAPIC, ioapic_shift)),
+        xcrs: parse_xcrs(data, adj(REF_XCRS, cpu_shift)),
+        xsave: parse_xsave(data, adj(REF_XSAVE, cpu_shift)),
         cpuid_entries: parse_cpuid(data),
     })
 }
