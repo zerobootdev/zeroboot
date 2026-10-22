@@ -33,11 +33,12 @@ curl -X POST https://api.zeroboot.dev/v1/exec \
 
 | Metric | Zeroboot | E2B | microsandbox | Daytona |
 |---|---|---|---|---|
-| Spawn latency p50 | **0.79ms** | ~150ms | ~200ms | ~27ms |
-| Spawn latency p99 | 1.74ms | ~300ms | ~400ms | ~90ms |
-| Memory per sandbox | ~265KB | ~128MB | ~50MB | ~50MB |
-| Fork + exec (Python) | **~8ms** | - | - | - |
-| 1000 concurrent forks | 815ms | - | - | - |
+| Spawn latency p50 | **0.65ms** | ~150ms | ~200ms | ~27ms |
+| Spawn latency p99 | 1.00ms | ~300ms | ~400ms | ~90ms |
+| Memory per sandbox | ~169KB | ~128MB | ~50MB | ~50MB |
+| Fork + echo (serial) | **~5.8ms** | - | - | - |
+| Fork + Python exec | **~205ms** | - | - | - |
+| Filesystem (cat file) | **~30ms** | N/A | - | - |
 
 Each sandbox is a real KVM virtual machine with hardware-enforced memory isolation.
 
@@ -49,8 +50,9 @@ Each sandbox is a real KVM virtual machine with hardware-enforced memory isolati
 ```
 
 1. **Template** (one-time): Firecracker boots a VM, pre-loads your runtime, and snapshots memory + CPU state
-2. **Fork** (~0.8ms): Creates a new KVM VM, maps snapshot memory as CoW, restores all CPU state
-3. **Isolation**: Each fork is a separate KVM VM with hardware-enforced memory isolation
+2. **Fork** (~0.8ms): Creates a new KVM VM, maps snapshot memory as CoW, restores CPU state + virtio-blk device
+3. **Filesystem**: Each fork has an independent overlay block device — reads hit the shared base image, writes are isolated in-memory
+4. **Isolation**: Each fork is a separate KVM VM with hardware-enforced memory isolation
 
 ## SDKs
 

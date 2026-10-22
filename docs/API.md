@@ -113,3 +113,20 @@ Authorization: Bearer zb_live_key1
 - If no keys file exists, auth is disabled
 - Invalid or missing keys return **HTTP 401**
 - Rate limited at **100 req/s per key** (HTTP 429)
+
+## Filesystem Access
+
+Sandboxes have a full read-write filesystem backed by the rootfs image specified at template
+creation time. Each fork gets an independent overlay so writes are isolated:
+
+```python
+# Works inside CODE: commands
+import os
+os.makedirs("/tmp/mydir", exist_ok=True)
+with open("/tmp/mydir/output.txt", "w") as f:
+    f.write("hello from sandbox")
+print(open("/tmp/mydir/output.txt").read())  # hello from sandbox
+```
+
+Writes are discarded when the fork ends — the base image is never modified.
+To persist outputs, include them in the stdout response.
