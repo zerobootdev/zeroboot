@@ -1,0 +1,15 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: zeroboot
+  namespace: zeroboot
+  labels:
+    app: zeroboot
+spec:
+  type: ClusterIP   # Use LoadBalancer to expose externally
+  selector:
+    app: zeroboot
+  ports:
+    - name: http
+      port: 80
+      targetPort: 8080

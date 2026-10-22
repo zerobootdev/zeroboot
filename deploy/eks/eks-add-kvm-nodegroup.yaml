@@ -1,0 +1,37 @@
+# Scenario 2b: Add KVM node group to an EXISTING EKS cluster
+# Usage:
+#   eksctl create nodegroup -f eks-add-kvm-nodegroup.yaml
+
+apiVersion: eksctl.io/v1alpha5
+kind: ClusterConfig
+
+metadata:
+  name: zeroboot-eks       # must match existing cluster name
+  region: ap-southeast-1   # must match existing cluster region
+
+managedNodeGroups:
+  - name: zeroboot-kvm
+    instanceType: c8i.xlarge
+    minSize: 1
+    maxSize: 5
+    desiredCapacity: 2
+    amiFamily: AmazonLinux2023
+    volumeSize: 50
+    privateNetworking: true
+
+    cpuOptions:
+      nestedVirtualization: enabled
+
+    labels:
+      kvm-capable: "true"
+      workload: zeroboot
+
+    iam:
+      attachPolicyARNs:
+        - arn:aws:iam::aws:policy/AmazonEKSWorkerNodePolicy
+        - arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryReadOnly
+        - arn:aws:iam::aws:policy/AmazonEKS_CNI_Policy
+
+    tags:
+      Project: zeroboot
+      ManagedBy: eksctl

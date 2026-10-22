@@ -1,0 +1,108 @@
+# ── Advanced deployment option ─────────────────────────────────────────────────
+# This manifest is an ALTERNATIVE to daemonset.yaml. Use it when you need:
+#   - HPA (Horizontal Pod Autoscaler) for fine-grained replica control
+#   - Manual replica count management
+#   - A single shared PVC for workdir (single-replica only; ReadWriteOnce)
+#
+# For most deployments, prefer daemonset.yaml, which automatically places one
+# pod per KVM-capable node and integrates cleanly with cluster autoscalers.
+# ──────────────────────────────────────────────────────────────────────────────
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: zeroboot
+  namespace: zeroboot
+  labels:
+    app: zeroboot
+spec:
+  replicas: 1  # RWO PVC (ReadWriteOnce) is node-scoped; only one Pod can mount it at a time
+  selector:
+    matchLabels:
+      app: zeroboot
+  template:
+    metadata:
+      labels:
+        app: zeroboot
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8080"
+        prometheus.io/path: "/v1/metrics"
+    spec:
+      # ── Scheduling: only run on KVM-capable nodes ───────────────────────────
+      nodeSelector:
+        kvm-capable: "true"   # label KVM nodes with: kubectl label node <node> kvm-capable=true
+
+      # Spread pods across nodes — each pod needs its own physical memory for CoW
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchLabels:
+                  app: zeroboot
+              topologyKey: kubernetes.io/hostname
+
+      containers:
+        - name: zeroboot
+          image: ghcr.io/zerobootdev/zeroboot:latest
+          imagePullPolicy: Always
+          ports:
+            - name: http
+              containerPort: 8080
+
+          # ── KVM device access ──────────────────────────────────────────────
+          # Use privileged mode + hostPath mount (compatible with EKS without kubevirt).
+          # If KubeVirt device plugin is installed, you can replace this with:
+          #   resources.limits: { devices.kubevirt.io/kvm: "1" }
+          # and remove securityContext.privileged.
+          securityContext:
+            privileged: true
+          resources:
+            requests:
+              memory: "2Gi"
+              cpu: "1"
+            limits:
+              memory: "8Gi"
+              cpu: "4"
+
+          env:
+            - name: ZEROBOOT_WORKDIR
+              value: /var/lib/zeroboot
+            - name: ZEROBOOT_PORT
+              value: "8080"
+            - name: ZEROBOOT_TEMPLATE_WAIT
+              value: "15"
+            # Optional: path to api_keys.json on the PVC
+            # - name: ZEROBOOT_API_KEYS_FILE
+            #   value: /var/lib/zeroboot/api_keys.json
+
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/zeroboot
+            - name: kvm
+              mountPath: /dev/kvm
+
+          # ── Health checks ──────────────────────────────────────────────────
+          readinessProbe:
+            httpGet:
+              path: /v1/health
+              port: 8080
+            initialDelaySeconds: 30   # allow time for template creation on first boot
+            periodSeconds: 5
+            failureThreshold: 6
+
+          livenessProbe:
+            httpGet:
+              path: /v1/health
+              port: 8080
+            initialDelaySeconds: 120  # template creation takes ~19s; allow 2x margin
+            periodSeconds: 10
+            failureThreshold: 6
+
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: zeroboot-data
+        - name: kvm
+          hostPath:
+            path: /dev/kvm
+            type: CharDevice

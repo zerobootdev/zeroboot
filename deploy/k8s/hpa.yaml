@@ -1,0 +1,45 @@
+# Horizontal Pod Autoscaler for zeroboot
+#
+# Scales based on zeroboot_concurrent_forks — the number of active VM sandboxes
+# per pod. CPU/memory are poor proxies for zeroboot workloads because:
+#   - Fork is memory-bound (CoW page faults), not CPU-bound
+#   - RSS grows proportionally with concurrent sandboxes
+#
+# Prerequisites:
+#   1. prometheus-adapter installed and configured to expose zeroboot_concurrent_forks
+#      as a Kubernetes custom metric (pods/zeroboot_concurrent_forks)
+#   2. See docs/KUBERNETES.md for prometheus-adapter config snippet
+
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: zeroboot
+  namespace: zeroboot
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: zeroboot
+  minReplicas: 2
+  maxReplicas: 10
+  metrics:
+    - type: Pods
+      pods:
+        metric:
+          name: zeroboot_concurrent_forks
+        target:
+          type: AverageValue
+          averageValue: "800"   # scale out when avg concurrent sandboxes > 800 per pod
+  behavior:
+    scaleUp:
+      stabilizationWindowSeconds: 30
+      policies:
+        - type: Pods
+          value: 2
+          periodSeconds: 60
+    scaleDown:
+      stabilizationWindowSeconds: 300  # 5 min cooldown before scale-in
+      policies:
+        - type: Pods
+          value: 1
+          periodSeconds: 120

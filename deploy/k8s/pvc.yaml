@@ -1,0 +1,14 @@
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: zeroboot-data
+  namespace: zeroboot
+  labels:
+    app: zeroboot
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: gp3  # AWS EBS gp3; adjust for your cloud provider
+  resources:
+    requests:
+      storage: 20Gi     # vmlinux (~21MB) + rootfs (~500MB) + snapshot (~512MB) per template

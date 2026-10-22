@@ -1,0 +1,80 @@
+# ⚠️  WARNING: EKS Managed Node Groups silently drop CpuOptions
+#
+# This file uses managedNodeGroups with cpuOptions.nestedVirtualization.
+# However, EKS generates its own internal Launch Template from the user-supplied
+# one, and CpuOptions is NOT carried over — resulting in nodes WITHOUT /dev/kvm
+# even though the YAML appears correct.
+#
+# STATUS: AWS has acknowledged this as a documentation gap (CpuOptions is not in
+# the official "blocked fields" list but is still ignored in practice).
+#
+# RECOMMENDED ALTERNATIVE: Use deploy/eks/eks-self-managed-kvm.yaml instead.
+# That file creates a Self-managed Node Group (ASG + Launch Template) where
+# CpuOptions is applied directly without EKS interference.
+#
+# Use THIS file only if you have verified that your eksctl version correctly
+# passes CpuOptions through (test with: kubectl run kvm-check ... ls /dev/kvm).
+
+# Scenario 1: Create EKS cluster with KVM node group in one shot
+# Usage:
+#   eksctl create cluster -f eks-with-kvm-nodegroup.yaml
+
+apiVersion: eksctl.io/v1alpha5
+kind: ClusterConfig
+
+metadata:
+  name: zeroboot-eks
+  region: ap-southeast-1
+  version: "1.31"
+
+# Cluster-level VPC (auto-created)
+vpc:
+  clusterEndpoints:
+    privateAccess: true
+    publicAccess: true
+
+# No default node group — only our KVM-capable group
+managedNodeGroups:
+  - name: zeroboot-kvm
+    instanceType: c8i.xlarge
+    minSize: 1
+    maxSize: 5
+    desiredCapacity: 2
+    amiFamily: AmazonLinux2023
+    volumeSize: 50          # GB — enough for OS + Docker images + zeroboot binary
+    privateNetworking: true # place nodes in private subnets
+
+    # Enable nested virtualization — requires c8i/m8i/r8i
+    cpuOptions:
+      nestedVirtualization: enabled
+
+    # Labels used by Deployment nodeSelector and Karpenter NodePool
+    labels:
+      kvm-capable: "true"
+      workload: zeroboot
+
+    # Optional: taint to reserve these nodes exclusively for zeroboot
+    # taints:
+    #   - key: zeroboot
+    #     value: "true"
+    #     effect: NoSchedule
+
+    iam:
+      attachPolicyARNs:
+        - arn:aws:iam::aws:policy/AmazonEKSWorkerNodePolicy
+        - arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryReadOnly
+        - arn:aws:iam::aws:policy/AmazonEKS_CNI_Policy
+
+    tags:
+      Project: zeroboot
+      ManagedBy: eksctl
+
+# Add-ons needed for EBS PVC support
+addons:
+  - name: aws-ebs-csi-driver
+    version: latest
+    attachPolicyARNs:
+      - arn:aws:iam::aws:policy/service-role/AmazonEBSCSIDriverPolicy
+
+iam:
+  withOIDC: true   # required for add-on IAM role binding (IRSA)

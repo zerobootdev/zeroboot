@@ -1,0 +1,28 @@
+# Scenario 2a: Create EKS cluster WITHOUT any node group
+# Usage:
+#   eksctl create cluster -f eks-cluster-only.yaml
+
+apiVersion: eksctl.io/v1alpha5
+kind: ClusterConfig
+
+metadata:
+  name: zeroboot-eks
+  region: ap-southeast-1
+  version: "1.31"
+
+vpc:
+  clusterEndpoints:
+    privateAccess: true
+    publicAccess: true
+
+# Explicitly no node groups at cluster creation time
+managedNodeGroups: []
+
+iam:
+  withOIDC: true
+
+addons:
+  - name: aws-ebs-csi-driver
+    version: latest
+    attachPolicyARNs:
+      - arn:aws:iam::aws:policy/service-role/AmazonEBSCSIDriverPolicy
